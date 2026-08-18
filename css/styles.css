@@ -205,9 +205,31 @@ select:focus-visible, .btn:focus-visible, .icon-btn:focus-visible {
 .ch.wrong     { color: var(--bad); background: var(--bad-bg); border-radius: 2px; }
 .ch.wrong.space { text-decoration: underline; }
 
+/* typed past the end of a word */
+.ch.extra {
+  color: var(--bad);
+  background: var(--bad-bg);
+  border-radius: 2px;
+  text-decoration: line-through;
+}
+/* skipped by hitting space early */
+.ch.missed {
+  color: var(--bad);
+  opacity: .6;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
 /* blind mode hides the marking while you type */
 .passage.blind .ch.correct,
-.passage.blind .ch.wrong { color: var(--text); background: none; }
+.passage.blind .ch.wrong,
+.passage.blind .ch.missed,
+.passage.blind .ch.extra {
+  color: var(--text);
+  background: none;
+  opacity: 1;
+  text-decoration: none;
+}
 
 .ch.caret::before {
   content: "";

@@ -2,6 +2,12 @@
    Typing Speed & Accuracy Test
    Plain ES5-friendly JavaScript. No build step, no dependencies.
    Nothing leaves the browser: no network calls, no storage of results.
+
+   Text is compared word by word rather than character by character.
+   That matters: if you drop a single letter early on, a strict
+   character comparison would mark every remaining character in the
+   passage as wrong. Comparing word against word means a slip only
+   costs you that one word, and the next space puts you back in step.
    ================================================================== */
 (function () {
   'use strict';
@@ -50,16 +56,18 @@
 
   /* ------------------------------------------------------------ state */
   var state = {
-    target: '',            // the passage, as a plain string
-    title: '',             // its name, for the history table
+    target: '',            // the passage as a plain string
+    words: [],             // ...and split on spaces
+    wordEls: [],           // { el, chars[], spaceEl, extras[], extraText }
+    title: '',
     typed: '',             // what is currently in the input
-    chars: [],             // one <span> per character of the passage
+    cmp: null,             // latest comparison result
     started: false,
     finished: false,
-    t0: 0,                 // start stamp, from performance.now()
+    t0: 0,                 // start stamp
     t1: 0,                 // end stamp
     keysTotal: 0,          // every character-producing key press
-    keysCorrect: 0,        // ...that matched the passage first time
+    keysCorrect: 0,        // ...that landed on the right character
     mode: CONFIG.defaultMode,
     duration: CONFIG.defaultDuration,
     customText: null,
@@ -68,8 +76,10 @@
     history: []
   };
 
-  /* clock() is monotonic where available, so a stuttering tab or a
-     system clock change can never make the timer jump.                */
+  var OVERRUN = 20;        // how far past the passage you are allowed to type
+
+  /* Monotonic where available, so a stuttering tab or a change to the
+     machine's system clock can never make the timer jump.              */
   var clock = (window.performance && performance.now)
     ? function () { return performance.now(); }
     : function () { return new Date().getTime(); };
@@ -79,7 +89,6 @@
     document.documentElement.setAttribute('data-theme', loadTheme());
     document.documentElement.style.setProperty('--passage-size', CONFIG.fontSize + 'px');
 
-    // durations
     CONFIG.durations.forEach(function (d) {
       var o = document.createElement('option');
       o.value = d; o.textContent = d;
@@ -88,7 +97,6 @@
     el.durSel.value = String(CONFIG.defaultDuration);
     el.modeSel.value = CONFIG.defaultMode;
 
-    // passages
     var rnd = document.createElement('option');
     rnd.value = 'random'; rnd.textContent = 'Random';
     el.passSel.appendChild(rnd);
@@ -99,8 +107,8 @@
     });
     el.passSel.value = 'random';
 
-    // The headline accuracy already appears in the big cells, so drop the
-    // small cell that would repeat it.
+    // the headline accuracy already has a big cell, so drop the small
+    // cell that would repeat it
     var dupe = (CONFIG.accuracyMode === 'final') ? res.finAcc : res.keyAcc;
     dupe.parentNode.hidden = true;
 
@@ -112,20 +120,20 @@
     el.modeSel.addEventListener('change', function () {
       state.mode = el.modeSel.value;
       syncModeUi();
-      reset(false);
+      reset();
     });
     el.durSel.addEventListener('change', function () {
       state.duration = parseInt(el.durSel.value, 10);
-      reset(false);
+      reset();
     });
     el.passSel.addEventListener('change', function () {
       if (el.passSel.value !== 'custom') state.customText = null;
       loadPassage();
     });
 
-    el.restart.addEventListener('click', function () { reset(false); focusInput(); });
-    el.againBtn.addEventListener('click', function () { reset(false); focusInput(); });
-    el.nextBtn.addEventListener('click', function () { loadPassage(true); focusInput(); });
+    el.restart.addEventListener('click',  function () { reset(); focusInput(); });
+    el.againBtn.addEventListener('click', function () { reset(); focusInput(); });
+    el.nextBtn.addEventListener('click',  function () { loadPassage(true); focusInput(); });
 
     el.themeBtn.addEventListener('click', toggleTheme);
 
@@ -138,7 +146,7 @@
     el.input.addEventListener('blur',  function () { el.area.classList.remove('focused'); });
     el.area.addEventListener('mousedown', function (e) {
       if (state.finished || e.target === el.input) return;
-      e.preventDefault();          // keeps the passage text unselectable
+      e.preventDefault();                       // passage text stays unselectable
       focusInput();
     });
 
@@ -147,7 +155,7 @@
         if (e.key === 'Escape') closeModal();
         return;
       }
-      if (e.key === 'Tab')    { e.preventDefault(); reset(false); focusInput(); }
+      if (e.key === 'Tab')    { e.preventDefault(); reset(); focusInput(); }
       if (e.key === 'Escape') { e.preventDefault(); loadPassage(true); focusInput(); }
     });
 
@@ -171,12 +179,11 @@
     var text, title;
 
     // "New passage" always moves on to a built-in one, even if you were
-    // part way through your own text.
+    // part way through your own text
     if (forceNew && state.customText) {
       state.customText = null;
       el.passSel.value = 'random';
     }
-    // the "Your own text" entry only exists while there is text behind it
     if (!state.customText) dropCustomOption();
 
     if (state.customText) {
@@ -191,6 +198,7 @@
       text = PASSAGES[i].text; title = PASSAGES[i].title;
     } else {
       var idx = parseInt(el.passSel.value, 10);
+      if (isNaN(idx)) idx = 0;
       if (forceNew && PASSAGES.length > 1) {
         idx = (idx + 1) % PASSAGES.length;
         el.passSel.value = String(idx);
@@ -202,12 +210,12 @@
     state.target = cleanText(text);
     state.title  = title;
     renderPassage();
-    reset(false);
+    reset();
   }
 
-  /* Flatten line breaks and repeated spaces, and swap the curly quotes
-     and dashes that word processors insert for the plain ones a keyboard
-     can actually produce. Otherwise the passage is impossible to match. */
+  /* Flatten line breaks and repeated spaces, and swap the curly quotes and
+     dashes a word processor inserts for the plain ones a keyboard can
+     actually produce — otherwise the passage is impossible to match.    */
   function cleanText(s) {
     return String(s)
       .replace(/[‘’‛]/g, "'")
@@ -221,28 +229,36 @@
 
   function renderPassage() {
     el.passage.textContent = '';
-    state.chars = [];
+    state.words = state.target.length ? state.target.split(' ') : [];
+    state.wordEls = [];
 
-    // Characters are grouped into words so that a word never breaks
-    // across two lines mid-way through.
-    var words = state.target.split(' ');
-    var frag  = document.createDocumentFragment();
-    var index = 0;
+    var frag = document.createDocumentFragment();
 
-    words.forEach(function (w, wi) {
+    state.words.forEach(function (w, wi) {
       var wordEl = document.createElement('span');
       wordEl.className = 'word';
-      var chunk = w + (wi < words.length - 1 ? ' ' : '');
 
-      for (var i = 0; i < chunk.length; i++) {
+      var chars = [];
+      for (var i = 0; i < w.length; i++) {
         var c = document.createElement('span');
         c.className = 'ch';
-        c.textContent = chunk.charAt(i);
-        if (chunk.charAt(i) === ' ') c.classList.add('space');
+        c.textContent = w.charAt(i);
         wordEl.appendChild(c);
-        state.chars[index++] = c;
+        chars.push(c);
       }
+
+      // the space that follows the word lives inside it, so a word is
+      // never split across two lines
+      var spaceEl = null;
+      if (wi < state.words.length - 1) {
+        spaceEl = document.createElement('span');
+        spaceEl.className = 'ch space';
+        spaceEl.textContent = ' ';
+        wordEl.appendChild(spaceEl);
+      }
+
       frag.appendChild(wordEl);
+      state.wordEls.push({ el: wordEl, chars: chars, spaceEl: spaceEl, extras: [], extraText: '' });
     });
 
     el.passage.appendChild(frag);
@@ -250,7 +266,7 @@
   }
 
   /* ------------------------------------------------------------ reset */
-  function reset(keepResults) {
+  function reset() {
     stopTicker();
     state.typed = '';
     state.started = false;
@@ -263,9 +279,9 @@
     el.area.classList.remove('done');
     el.passage.classList.toggle('blind', !!CONFIG.blindMode);
     el.passage.scrollTop = 0;
+    el.results.hidden = true;
 
-    if (!keepResults) el.results.hidden = true;
-
+    state.cmp = compare('');
     paint();
     updateStats();
   }
@@ -275,16 +291,60 @@
     el.input.focus();
   }
 
+  /* -------------------------------------------------------- comparing */
+  /* Walks the typed text alongside the passage, one word at a time, and
+     labels every character that was typed:
+        ok    — right character, right place
+        bad   — wrong character
+        extra — typed past the end of that word
+     Characters of a word that were skipped because you pressed space
+     early are counted separately as "missed".                          */
+  function compare(typed) {
+    var tw = state.words;
+    var uw = typed.length ? typed.split(' ') : [];
+    var marks = [];
+    var missed = 0;
+    var perWord = [];
+
+    for (var i = 0; i < uw.length; i++) {
+      var t = tw[i] || '';
+      var u = uw[i];
+      var wordMarks = [];
+
+      for (var j = 0; j < u.length; j++) {
+        var kind = (j >= t.length) ? 'extra'
+                 : (u.charAt(j) === t.charAt(j) ? 'ok' : 'bad');
+        marks.push(kind);
+        wordMarks.push(kind);
+      }
+      perWord.push({ typed: u, marks: wordMarks });
+
+      // a space was typed after this word, so the word is finished with
+      if (i < uw.length - 1) {
+        marks.push(i < tw.length - 1 ? 'ok' : 'extra');
+        if (u.length < t.length) missed += t.length - u.length;
+      }
+    }
+
+    return { marks: marks, words: perWord, missed: missed, uw: uw };
+  }
+
   /* ------------------------------------------------------------ input */
   function onKeyDown(e) {
     if (state.finished) { e.preventDefault(); return; }
 
     // Passages are a single line, so Enter is never typed into the text.
-    // Once the passage is full it doubles as "I am done, score me" — which
+    // At the end of a passage it doubles as "I am done, score me" — which
     // is how you finish a run that still has mistakes showing.
     if (e.key === 'Enter') {
       e.preventDefault();
-      if (state.started && state.typed.length === state.target.length) finish('complete');
+      if (state.started && atEndOfPassage()) finish('complete');
+      return;
+    }
+
+    // no leading or doubled spaces: they would silently skip a word
+    if (e.key === ' ' && (state.typed === '' || state.typed.slice(-1) === ' ')) {
+      e.preventDefault();
       return;
     }
 
@@ -296,73 +356,146 @@
   function onInput() {
     if (state.finished) { el.input.value = state.typed; return; }
 
-    var v = el.input.value.replace(/[\n\r\t]/g, '');
-    if (v.length > state.target.length) v = v.slice(0, state.target.length);
+    var limit = state.target.length + OVERRUN;
+    var v = el.input.value.replace(/[\n\r\t]/g, '').replace(/ {2,}/g, ' ');
+    if (v.charAt(0) === ' ') v = v.replace(/^ +/, '');
+    if (v.length > limit) v = v.slice(0, limit);
     if (v !== el.input.value) el.input.value = v;
 
     var prev = state.typed;
+    state.typed = v;
+    state.cmp = compare(v);
 
-    /* Count keystrokes on the part that is genuinely new. Anything typed
+    /* Count keystrokes on the part that is genuinely new. Anything retyped
        after a correction is counted again, which is what makes the
-       keystroke accuracy figure strict.                                */
+       keystroke accuracy figure the strict one.                         */
     var common = 0;
     while (common < prev.length && common < v.length && prev.charAt(common) === v.charAt(common)) common++;
 
-    var firstWrongAt = -1;
+    var mistakeJustMade = false;
     for (var i = common; i < v.length; i++) {
       state.keysTotal++;
-      if (v.charAt(i) === state.target.charAt(i)) {
-        state.keysCorrect++;
-      } else if (firstWrongAt === -1) {
-        firstWrongAt = i;
-      }
+      if (state.cmp.marks[i] === 'ok') state.keysCorrect++;
+      else mistakeJustMade = true;
     }
-
-    state.typed = v;
 
     if (!state.started && v.length > 0) start();
 
     paint();
     updateStats();
 
-    if (CONFIG.stopOnFirstError && firstWrongAt !== -1) { finish('error'); return; }
+    if (CONFIG.stopOnFirstError && mistakeJustMade) { finish('error'); return; }
 
-    // Reaching the end of the passage ends the run — in either mode.
-    // If mistakes are still showing we hold off, so there is a chance to
-    // correct them; Enter ends it there and then.
-    if (v.length === state.target.length && (countWrong() === 0 || !CONFIG.allowBackspace)) {
+    // Reaching the end of the passage ends the run, in either mode. If
+    // mistakes are still showing we hold off so there is a chance to fix
+    // them; Enter ends it there and then.
+    if (atEndOfPassage() && (errorsShowing() === 0 || !CONFIG.allowBackspace)) {
       finish('complete');
     }
   }
 
+  function atEndOfPassage() {
+    var tw = state.words, uw = state.cmp.uw;
+    if (!tw.length) return false;
+    if (uw.length < tw.length) return false;
+    return uw[tw.length - 1].length >= tw[tw.length - 1].length;
+  }
+
+  function errorsShowing() {
+    var n = state.cmp.missed;
+    for (var i = 0; i < state.cmp.marks.length; i++) {
+      if (state.cmp.marks[i] !== 'ok') n++;
+    }
+    return n;
+  }
+
   /* --------------------------------------------------------- painting */
   function paint() {
-    var typed = state.typed, chars = state.chars;
-    if (!chars.length) { el.progress.textContent = ''; return; }
-    var caretAt = Math.min(typed.length, chars.length - 1);
+    var cmp = state.cmp;
+    var uw = cmp.uw;
+    var current = uw.length - 1;           // word the caret is sitting in
+    var caretEl = null, caretAtEnd = false;
 
-    for (var i = 0; i < chars.length; i++) {
-      var c = chars[i];
-      var want = state.target.charAt(i);
-      var cls = 'ch' + (want === ' ' ? ' space' : '');
+    for (var i = 0; i < state.wordEls.length; i++) {
+      var w = state.wordEls[i];
+      var t = state.words[i];
+      var typedWord = (i < uw.length) ? uw[i] : null;
+      var movedOn = (i < uw.length - 1);
+      var marks = (i < cmp.words.length) ? cmp.words[i].marks : [];
 
-      if (i < typed.length) {
-        cls += (typed.charAt(i) === want) ? ' correct' : ' wrong';
+      for (var j = 0; j < w.chars.length; j++) {
+        var cls = 'ch';
+        if (typedWord === null) {
+          /* not reached yet */
+        } else if (j < typedWord.length) {
+          cls += (marks[j] === 'ok') ? ' correct' : ' wrong';
+        } else if (movedOn) {
+          cls += ' missed';                // skipped by pressing space early
+        }
+        if (w.chars[j].className !== cls) w.chars[j].className = cls;
       }
-      if (i === caretAt) {
-        cls += ' caret';
-        if (typed.length >= chars.length) cls += ' at-end';
+
+      // characters typed past the end of the word get appended in red
+      var extraText = (typedWord && typedWord.length > t.length) ? typedWord.slice(t.length) : '';
+      if (extraText !== w.extraText) renderExtras(w, extraText);
+
+      if (w.spaceEl) {
+        var scls = 'ch space' + (movedOn ? ' correct' : '');
+        if (w.spaceEl.className !== scls) w.spaceEl.className = scls;
       }
-      if (c.className !== cls) c.className = cls;
+
+      if (i === current) {
+        var offset = typedWord.length;
+        if (offset < w.chars.length) {
+          caretEl = w.chars[offset];
+        } else if (w.extras.length) {
+          caretEl = w.extras[w.extras.length - 1];
+          caretAtEnd = true;
+        } else if (w.spaceEl) {
+          caretEl = w.spaceEl;
+        } else if (w.chars.length) {
+          caretEl = w.chars[w.chars.length - 1];
+          caretAtEnd = true;
+        }
+      }
     }
 
-    keepCaretVisible(chars[caretAt]);
+    // the caret sits at the very start before anything is typed
+    if (!caretEl && state.wordEls.length) {
+      caretEl = state.wordEls[0].chars[0] || state.wordEls[0].spaceEl;
+    }
+    setCaret(caretEl, caretAtEnd);
+    keepCaretVisible(caretEl);
 
-    if (!state.finished && typed.length === state.target.length && countWrong() > 0) {
+    if (!state.finished && atEndOfPassage() && errorsShowing() > 0) {
       el.progress.textContent = 'End of passage — fix the red characters, or press Enter to finish now';
     } else {
-      el.progress.textContent = typed.length + ' / ' + state.target.length + ' characters';
+      el.progress.textContent = state.typed.length + ' / ' + state.target.length + ' characters';
     }
+  }
+
+  var lastCaretEl = null;
+  function setCaret(node, atEnd) {
+    if (lastCaretEl && lastCaretEl !== node) {
+      lastCaretEl.classList.remove('caret', 'at-end');
+    }
+    if (node) {
+      node.classList.add('caret');
+      node.classList.toggle('at-end', !!atEnd);
+    }
+    lastCaretEl = node;
+  }
+
+  function renderExtras(w, text) {
+    while (w.extras.length) w.el.removeChild(w.extras.pop());
+    for (var i = 0; i < text.length; i++) {
+      var s = document.createElement('span');
+      s.className = 'ch extra';
+      s.textContent = text.charAt(i) === ' ' ? '·' : text.charAt(i);
+      w.el.insertBefore(s, w.spaceEl);     // before the space, or at the end
+      w.extras.push(s);
+    }
+    w.extraText = text;
   }
 
   function keepCaretVisible(node) {
@@ -407,26 +540,23 @@
   }
 
   /* ---------------------------------------------------------- metrics */
-  function countWrong() {
-    var n = 0;
-    for (var i = 0; i < state.typed.length; i++) {
-      if (state.typed.charAt(i) !== state.target.charAt(i)) n++;
-    }
-    return n;
-  }
-
   function metrics() {
     var ms = elapsedMs();
     var minutes = ms / 60000;
     var typed = state.typed.length;
-    var wrongLeft = countWrong();
-    var correctLeft = typed - wrongLeft;
+
+    var correct = 0;
+    for (var i = 0; i < state.cmp.marks.length; i++) {
+      if (state.cmp.marks[i] === 'ok') correct++;
+    }
+    var missed = state.cmp.missed;
+    var wrongLeft = (typed - correct) + missed;   // errors still on screen
 
     var gross = minutes > 0 ? (typed / 5) / minutes : 0;
     var net   = minutes > 0 ? Math.max(0, gross - (wrongLeft / minutes)) : 0;
 
     var keyAcc = state.keysTotal > 0 ? (state.keysCorrect / state.keysTotal) * 100 : 100;
-    var finAcc = typed > 0 ? (correctLeft / typed) * 100 : 100;
+    var finAcc = (typed + missed) > 0 ? (correct / (typed + missed)) * 100 : 100;
 
     return {
       ms: ms,
@@ -456,8 +586,8 @@
 
     el.wpmVal.textContent = Math.round(m.net);
 
-    // In blind mode the live accuracy and error count would give the game
-    // away, so they stay hidden until the run is over.
+    // in blind mode the live accuracy and error count would give the game
+    // away, so they stay hidden until the run is over
     if (CONFIG.blindMode && !state.finished) {
       el.accVal.textContent = '—';
       el.errVal.textContent = '—';
@@ -467,24 +597,20 @@
     }
   }
 
-  /* ---------------------------------------------------------- finish */
+  /* ----------------------------------------------------------- finish */
   function finish(reason) {
     if (state.finished) return;
 
-    // For a timed run the clock is pinned to the exact limit, so two runs
-    // of the same length always report the same elapsed time.
-    if (reason === 'timeup') {
-      state.t1 = state.t0 + state.duration * 1000;
-    } else {
-      state.t1 = clock();
-    }
+    // On a timed run the clock is pinned to the limit exactly, so a 60
+    // second test always reports 60.0 seconds rather than 60.1.
+    state.t1 = (reason === 'timeup') ? state.t0 + state.duration * 1000 : clock();
     state.finished = true;
     stopTicker();
 
     el.input.disabled = true;
     el.area.classList.add('done');
     el.area.classList.remove('focused');
-    el.passage.classList.remove('blind');     // always reveal marking at the end
+    el.passage.classList.remove('blind');       // always reveal the marking
     paint();
 
     var m = metrics();
@@ -527,8 +653,8 @@
   }
 
   function reasonText(reason) {
-    if (reason === 'timeup')   return 'Time is up';
-    if (reason === 'error')    return 'Stopped on the first mistake';
+    if (reason === 'timeup') return 'Time is up';
+    if (reason === 'error')  return 'Stopped on the first mistake';
     return 'Passage complete';
   }
 
@@ -571,7 +697,7 @@
     return td;
   }
 
-  /* ------------------------------------------------------------ modal */
+  /* ------------------------------------------------------- own text */
   function dropCustomOption() {
     var opt = document.getElementById('customOption');
     if (opt) {
@@ -590,6 +716,7 @@
   function useCustomText() {
     var t = cleanText(el.cText.value);
     if (t.length < 10) { el.cText.focus(); return; }
+
     state.customText = t;
     state.target = t;
     state.title = 'Your own text';
@@ -605,7 +732,7 @@
     el.passSel.value = 'custom';
 
     renderPassage();
-    reset(false);
+    reset();
     closeModal();
   }
 
