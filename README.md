@@ -57,8 +57,8 @@ Edit the values, save, refresh the browser.
 | Setting | Default | What it does |
 |---|---|---|
 | `showPassFail` | `true` | Show a PASS / NOT PASSED banner on the result panel |
-| `targetWpm` | `50` | Net WPM needed to pass |
-| `targetAccuracy` | `95` | Accuracy % needed to pass |
+| `targetWpm` | `40` | Net WPM needed to pass |
+| `targetAccuracy` | `80` | Accuracy % needed to pass |
 | `accuracyMode` | `'keystroke'` | Which accuracy figure is the headline, and which one the pass check uses. `'keystroke'` or `'final'` — see below |
 | `defaultMode` | `'timed'` | `'timed'` = countdown clock, `'passage'` = type the whole passage |
 | `defaultDuration` | `60` | Seconds for a timed run |
@@ -154,6 +154,13 @@ half a word cannot flatter the score.
 
 Both are always shown in the result panel. `accuracyMode` decides which one is
 the headline figure and which one the pass/fail check uses.
+
+**Pass / fail** needs the WPM *and* the accuracy to reach the target, and both
+are judged on the numbers exactly as they are displayed — the rounded ones you
+can see — rather than on the raw figures behind them. Otherwise a run showing
+`40 wpm` against a 40 wpm target could be marked "needs 1 more wpm", because
+the true figure was 39.6. Correct arithmetic, but it reads as a bug. Meeting
+the target exactly is a pass.
 
 **The clock** starts on your first keystroke, not when the page loads, and it
 reads `performance.now()` — a monotonic clock. It cannot drift if the tab

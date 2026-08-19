@@ -633,16 +633,16 @@
     res.left.textContent   = m.wrongLeft;
 
     if (CONFIG.showPassFail) {
-      var pass = (m.net >= CONFIG.targetWpm) && (m.acc >= CONFIG.targetAccuracy);
+      var j    = judge(m);
       var why  = 'Target: ' + CONFIG.targetWpm + ' wpm and ' + CONFIG.targetAccuracy + '% accuracy';
-      if (!pass) {
+      if (!j.pass) {
         var missing = [];
-        if (m.net < CONFIG.targetWpm) missing.push('needs ' + Math.ceil(CONFIG.targetWpm - m.net) + ' more wpm');
-        if (m.acc < CONFIG.targetAccuracy) missing.push('needs ' + round1(CONFIG.targetAccuracy - m.acc) + '% more accuracy');
+        if (j.net < CONFIG.targetWpm) missing.push('needs ' + (CONFIG.targetWpm - j.net) + ' more wpm');
+        if (j.acc < CONFIG.targetAccuracy) missing.push('needs ' + round1(CONFIG.targetAccuracy - j.acc) + '% more accuracy');
         why += ' — ' + missing.join(', ');
       }
-      el.verdict.className = 'verdict ' + (pass ? 'pass' : 'fail');
-      el.verdict.innerHTML = (pass ? 'PASSED' : 'NOT PASSED') + '<small>' + why + '</small>';
+      el.verdict.className = 'verdict ' + (j.pass ? 'pass' : 'fail');
+      el.verdict.innerHTML = (j.pass ? 'PASSED' : 'NOT PASSED') + '<small>' + why + '</small>';
     } else {
       el.verdict.className = 'verdict plain';
       el.verdict.innerHTML = '<small>' + reasonText(reason) + '</small>';
@@ -660,17 +660,30 @@
 
   function round1(n) { return Math.round(n * 10) / 10; }
 
+  /* Pass/fail is judged on the numbers as they are DISPLAYED, not on the
+     raw floats behind them. Otherwise a run reporting 40 wpm could be
+     marked "needs 1 more wpm" because the true figure was 39.6 — correct
+     arithmetic, but it reads as a bug. What you see is what is judged. */
+  function judge(m) {
+    var net = Math.round(m.net);
+    var acc = round1(m.acc);
+    return {
+      net:  net,
+      acc:  acc,
+      pass: net >= CONFIG.targetWpm && acc >= CONFIG.targetAccuracy
+    };
+  }
+
   /* ---------------------------------------------------------- history */
   function pushHistory(m) {
     if (!CONFIG.keepSessionHistory) return;
 
-    var pass = CONFIG.showPassFail
-      ? (m.net >= CONFIG.targetWpm && m.acc >= CONFIG.targetAccuracy)
-      : null;
+    var j    = judge(m);
+    var pass = CONFIG.showPassFail ? j.pass : null;
 
     state.history.unshift({
-      net: Math.round(m.net),
-      acc: round1(m.acc),
+      net: j.net,
+      acc: j.acc,
       secs: round1(m.seconds),
       title: state.title,
       pass: pass

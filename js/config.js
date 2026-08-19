@@ -8,8 +8,8 @@ const CONFIG = {
   /* ---- Pass / fail thresholds -------------------------------------
      Set showPassFail to false if you just want the raw numbers.       */
   showPassFail : true,
-  targetWpm    : 50,      // minimum net WPM required to pass
-  targetAccuracy : 95,    // minimum accuracy % required to pass
+  targetWpm    : 40,      // minimum net WPM required to pass
+  targetAccuracy : 80,    // minimum accuracy % required to pass
 
   /* ---- Which accuracy number is the headline ----------------------
      'keystroke' : every key you press is judged. A mistake still
